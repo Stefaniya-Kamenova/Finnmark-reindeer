@@ -1,0 +1,526 @@
+---
+title: "Finnmark reindeer"
+output: html_notebook
+---
+
+```{r}
+library(ROBITools)
+library(ROBITaxonomy)
+library(vegan)
+library(tidyverse)
+library(ade4)
+library(ggplot2)
+```
+
+## Loading the data
+```{r}
+FF.raw = import.metabarcoding.data("Finn_GH_all_plates_merged.paired.ali.assigned.diag.uniq.c10.l10.clean.tag.ann.sort.tab")
+```
+
+## Loading the metadata
+```{r}
+FF.metadata = read_csv2("Finn_metadata.csv")
+```
+
+## Split samples names
+```{r}
+sample_names_split = simplify2array(strsplit(as.character(samples(FF.raw)$sample), "_R"))
+
+replicate = sample_names_split[2,]
+sample_id = sample_names_split[1,]
+
+samples_desc = data.frame(name = samples(FF.raw)$sample, 
+                          replicate = replicate, 
+                          sample_id = sample_id)
+
+```
+
+## Join data and metadata by the "sample_id" column
+```{r}
+samples_desc = left_join(samples_desc,FF.metadata,by="sample_id")
+rownames(samples_desc) = as.character(samples_desc$name)
+```
+
+```{r}
+FF.raw@samples = samples_desc
+```
+
+
+## Categorize MOTUs
+
+### Label positive control sequences
+```{r}
+Standard1 = "taagtctcgcactagttgtgacctaacgaatagagaattctataagacgtgttgtcccat"
+Standard2   = "gtgtatggtatatttgaataatattaaatagaatttaatcaatctttacatcgcttaata"
+Standard3   = "cacaatgctcggtaactagaagcatttgta"
+Standard4   = "attgaatgaaaagattattcgatatagaat"
+Standard5   = "agaacgctagaatctaagatggggggggggatgagtaagatatttatcagtaacatatga"
+Standard6   = "atttttgtaactcattaacaattttttttttgatgtatcataagtactaaactagttact"
+```
+
+
+```{r}
+sequence_type = rep("Unknown", nrow(motus(FF.raw)))
+sequence_type[which(motus(FF.raw)$`best_identity:db_GH`> 0.85)] = "GH"
+sequence_type[which(motus(FF.raw)$sequence == Standard1)] = "standard1"
+sequence_type[which(motus(FF.raw)$sequence == Standard2)] = "standard2"
+sequence_type[which(motus(FF.raw)$sequence == Standard3)] = "standard3"
+sequence_type[which(motus(FF.raw)$sequence == Standard4)] = "standard4"
+sequence_type[which(motus(FF.raw)$sequence == Standard5)] = "standard5"
+sequence_type[which(motus(FF.raw)$sequence == Standard6)] = "standard6"
+
+FF.raw@motus$sequence_type = as.factor(sequence_type)
+table(FF.raw@motus$sequence_type)
+```
+
+
+## Extract OBIClean data
+```{r}
+FF.raw2 = extracts.obiclean(FF.raw)
+```
+
+## Select MOTUs always appearing as internals
+```{r}
+d = dim(FF.raw2)
+internal = FF.raw2$obiclean_status=='i'
+dim(internal)=d
+always_internal = apply(internal, MARGIN = 2, FUN = all, na.rm = TRUE)
+```
+
+
+```{r}
+FF.raw2.reads_per_motu = colSums(reads(FF.raw2))
+plot(FF.raw2.reads_per_motu,log="y",
+     cex=0.1 + 0.5 * (FF.raw2@motus$sequence_type!="GH"),
+     col = as.integer(FF.raw2@motus$sequence_type), pch=16)
+```
+```{r}
+rp <- FF.raw2.reads_per_motu[! FF.raw2@motus$sequence_type  %in% c("GH","Unknown")]
+rp/sum(rp)
+
+plot(1/2^(1:6),rp/sum(rp))
+```
+
+```{r}
+sr <- FF.raw2@reads[grep("^S",FF.raw2@samples$name),]
+boxplot(apply(sr[,!FF.raw2@motus$sequence_type  %in% c("GH","Unknown")],1,max)/rowSums(sr)*100 ~
+                rowSums(sr[,!FF.raw2@motus$sequence_type  %in% c("GH","Unknown")]> 0),
+        ylab="% of positive sequence in samples",log="y",
+        xlab="Number of positive sequences per PCR",
+        ylim=c(1e-4,100), outline=FALSE)
+points(jitter(rowSums(sr[,!FF.raw2@motus$sequence_type  %in% c("GH","Unknown")]> 0)+1),
+       apply(sr[,!FF.raw2@motus$sequence_type  %in% c("GH","Unknown")],1,max)/rowSums(sr)*100,
+       col="blue",pch=16,cex=0.5)
+abline(h=1,col="red",lty=2)
+
+```
+
+
+## Remove MOTUs always appearing as internals here, keeping only the “the”good" MOTUs (head & singleton)
+
+```{r}
+FF.raw.obiclean = FF.raw2[,! always_internal]
+```
+
+
+```{r}
+FF.raw2.reads_per_motu_2 = colSums(reads(FF.raw.obiclean))
+plot(FF.raw2.reads_per_motu_2,log="y",
+     cex=0.1 + 0.5 * (FF.raw2@motus$sequence_type!="GH"),
+     col = as.integer(FF.raw2@motus$sequence_type), pch=16)
+```
+
+## Remove all MOTUs with only 1 read in one sample (as these are most likely artefacts)
+```{r}
+singleton = colSums(reads(FF.raw.obiclean)) == 1
+FF.raw.obiclean.nosingleton = FF.raw.obiclean[,! singleton]
+table(singleton)
+```
+
+
+```{r}
+source("select_pcr.R")
+```
+
+## Remove outlier PCR replicates
+```{r}
+keep1 = tag_bad_pcr(samples = samples(FF.raw.obiclean.nosingleton)$sample_id, 
+                   counts = reads(FF.raw.obiclean.nosingleton),
+                   plot = TRUE
+                  )
+threshold = 0.3
+keep = ((keep1$distance < threshold) | keep1$distance!=keep1$maximum) & keep1$repeats > 1
+abline(v=threshold,col="blue",lty=2)
+```
+
+
+```{r}
+table(keep1$keep)
+table(keep)
+```
+
+
+```{r}
+samples(FF.raw.obiclean.nosingleton)$name[!keep]
+```
+
+## Keep only the good PCR replicates and store them in a new object
+
+```{r}
+FF.raw.obiclean.k1 = FF.raw.obiclean.nosingleton[keep,]
+```
+
+## Recalculate the new baricentre with the remaining replicates
+
+```{r}
+keep2 = tag_bad_pcr(samples = samples(FF.raw.obiclean.k1)$sample_id, 
+                   counts = reads(FF.raw.obiclean.k1),
+                   plot = TRUE
+                  )
+threshold = 0.3
+keep = ((keep2$distance < threshold) | keep2$distance!=keep2$maximum) & keep2$repeats > 1
+abline(v=threshold,col="blue",lty=2)
+```
+
+```{r}
+table(keep2$keep)
+table(keep)
+```
+
+```{r}
+samples(FF.raw.obiclean.k1)$name[!keep]
+```
+## Keep only the good PCR replicates and store them in a new object
+
+```{r}
+FF.raw.obiclean.k2 = FF.raw.obiclean.k1[keep,]
+```
+
+## Recalculate the new baricentre with the remaining replicates
+
+```{r}
+keep3 = tag_bad_pcr(samples = samples(FF.raw.obiclean.k2)$sample_id, 
+                   counts = reads(FF.raw.obiclean.k2),
+                   plot = TRUE
+                  )
+threshold = 0.3
+keep = ((keep3$distance < threshold) | keep3$distance!=keep3$maximum) & keep3$repeats > 1
+abline(v=threshold,col="blue",lty=2)
+```
+
+```{r}
+table(keep3$keep)
+table(keep)
+```
+
+```{r}
+samples(FF.raw.obiclean.k2)$name[!keep]
+```
+
+## Keep only the good PCR replicates and store them in a new object
+
+```{r}
+FF.raw.obiclean.k3 = FF.raw.obiclean.k2[keep,]
+```
+
+
+```{r}
+dim(FF.raw.obiclean.k3)
+```
+
+```{r}
+sr <- FF.raw.obiclean.k3@reads[grep("^S",FF.raw.obiclean.k3@samples$name),]
+boxplot(apply(sr[,!FF.raw.obiclean.k3@motus$sequence_type  %in% c("GH","Unknown")],1,max)/rowSums(sr)*100 ~
+                rowSums(sr[,!FF.raw.obiclean.k3@motus$sequence_type  %in% c("GH","Unknown")]> 0),
+        ylab="% of positive sequence in samples",log="y",
+        xlab="Number of positive sequences per PCR",
+        ylim=c(1e-4,100), outline=FALSE)
+points(jitter(rowSums(sr[,!FF.raw.obiclean.k3@motus$sequence_type  %in% c("GH","Unknown")]> 0)+1),
+       apply(sr[,!FF.raw.obiclean.k3@motus$sequence_type  %in% c("GH","Unknown")],1,max)/rowSums(sr)*100,
+       col="blue",pch=16,cex=0.5)
+abline(h=1,col="red",lty=2)
+```
+
+## Merge remaining PCR replicates, average reads numbers per sample, pass in relative reads abundance
+
+```{r}
+freq = decostand(reads(FF.raw.obiclean.k3),
+                 method = "total")
+FF.raw.obiclean.k3$count = reads(FF.raw.obiclean.k3)
+FF.raw.obiclean.k3@reads = freq
+FF.raw.merged = aggregate(FF.raw.obiclean.k3, 
+                          MARGIN = 1, 
+                          by = list(sample_id=samples(FF.raw.obiclean.k3)$sample_id), 
+                          FUN = mean)
+```
+
+
+
+
+```{r}
+plot(FF.raw.merged$motus$`best_identity:db_GH`,
+     apply(reads(FF.raw.merged),2,max),
+     col=FF.raw.merged@motus$sequence_type,
+     log="y",
+     ylab="Max read fequency in a sample",
+     xlab="Best identity with the reference database")
+abline(h=0.01,col="red",lty=2)
+```
+
+## Filter out rare species - keep only MOTUs appearing at 1% and more in at least one sample
+```{r}
+FF.raw.merged2 = FF.raw.merged[, which(apply (reads(FF.raw.merged),2,max) > 0.01)]
+```
+
+
+```{r}
+table(FF.raw.merged2@motus$sequence_type)
+```
+
+
+```{r}
+FF.raw.merged2@motus %>% 
+        filter(sequence_type == "Unknown") %>%
+        select(id,sequence)
+```
+
+How much unknown sequences represent among the total dataset ?
+
+```{r}
+colSums(FF.raw.merged2@reads[,FF.raw.merged2@motus$sequence_type == "Unknown"])/sum(FF.raw.merged2@reads)
+```
+
+In how many PCR unknown sequences occur ?
+
+
+```{r}
+colSums(FF.raw.merged2@reads[,FF.raw.merged2@motus$sequence_type == "Unknown"] > 0.01)
+```
+
+We get ride of non GH sequences:
+
+```{r}
+FF.raw.merged.GH = FF.raw.merged2[,FF.raw.merged2@motus$sequence_type == "GH"]
+```
+
+```{r}
+table(rowSums(FF.raw.merged.GH@reads) > 0)
+```
+
+```{r}
+FF.raw.merged.GH@samples %>% filter(rowSums(FF.raw.merged.GH@reads) == 0)
+```
+
+```{r}
+FF.raw.merged.Ok = FF.raw.merged.GH[rowSums(FF.raw.merged.GH@reads) > 0,]
+```
+
+```{r}
+plot(FF.raw.merged.Ok$motus$`best_identity:db_GH`,
+     apply(reads(FF.raw.merged.Ok),2,max),
+     col=FF.raw.merged.Ok@motus$sequence_type,
+     log="y",
+     ylab="Max read fequency in a sample",
+     xlab="Best identity with the reference database")
+abline(h=0.01,col="red",lty=2)
+```
+```{r}
+FF.raw.merged.Ok@motus %>% filter(`best_identity:db_GH` < 0.94) %>%
+        select(id,scientific_name,sequence)
+```
+
+# Check the remaining negative control
+
+```{r}
+x = FF.raw.merged.Ok@reads[1,]
+x[x>0]
+```
+
+```{r}
+which(x>0)
+FF.raw.merged.Ok$motus[97,]
+```
+
+```{r}
+FF.raw.merged.final = FF.raw.merged.Ok[-1,FF.raw.merged.Ok@motus$`best_identity:db_GH` > 0.94 &
+                                              colSums(FF.raw.merged.Ok@reads) > 0 ]
+
+table(colSums(FF.raw.merged.final@reads) == 0)
+table(rowSums(FF.raw.merged.final@reads) > 0)
+```
+
+
+
+
+
+## Saving the filtered dataset
+
+```{r}
+write.csv(motus(FF.raw.merged.final), 
+          file = "FF.filtered.samples.motus.csv")
+write.csv(samples(FF.raw.merged.final), 
+          file = "FF.filtered.samples.samples.csv")
+write.csv(reads(FF.raw.merged.final), 
+          file = "FF.filtered.samples.reads.csv")
+```
+
+## The Reads contingency table
+```{r}
+reads = read.csv("FF.filtered.samples.reads.csv",
+                 header = TRUE,
+                 row.names = 1,
+                 sep=",")
+reads = as.matrix(reads)
+```
+
+## The Samples description table
+```{r}
+samples = read.csv("FF.filtered.samples.samples.csv",
+                 header = TRUE,
+                 row.names = 1)
+```
+
+## The MOTUs description table
+```{r}
+motus = read.csv("FF.filtered.samples.motus.csv",
+                 header = TRUE,
+                 row.names = 1)
+```
+
+## Create an object, where you merge the three tables
+
+```{r}
+FF = metabarcoding.data(reads = reads,
+                          samples = samples,
+                          motus = motus)
+```
+
+```{r}
+FF@samples$Year_Month=factor(sapply(str_split(FF@samples$date,pattern = "\\."),
+                                    function(x) paste(rev(x)[1:2],collapse = "/")))
+
+FF@samples$district = factor(FF@samples$district)
+```
+
+
+```{r}
+head(motus(FF))
+```
+
+```{r}
+motus.hist = colMeans(reads(FF))
+FF@motus$mean_ref_freq = motus.hist
+FF = FF[,order(motus.hist,decreasing = TRUE)]
+hist(motus.hist)
+```
+
+
+```{r}
+motus(FF)[1:20,c("scientific_name","mean_ref_freq")]
+```
+
+## Hellinger transform, re-pass in relative abundance again (after filtering our rare MOTUs) & consider as diet each MOTU whose relative abundance >0
+
+```{r}
+FF$hellinger = decostand(reads(FF), method = "hellinger")
+FF$relfreq   = decostand(reads(FF), method = "total")
+FF$presence  = FF$relfreq >0
+```
+
+
+```{r}
+FF_pca = dudi.pca (FF$hellinger, scale = FALSE, nf=350, scannf = FALSE)
+```
+
+
+```{r}
+l = matrix(c(1,1,1,1,2,2), nrow = 2)
+layout(l) #layout --> fonction pour diviser l'écrsan graphique en sous-parties
+plot(FF_pca$li[,1:2], type = 'n') # pour ne pas afficher le point = les points sont invisibles
+text(FF_pca$li[,1],FF_pca$li[,2],
+     labels = samples(FF)$sample_id,col = rainbow(13)[as.integer(samples(FF)$Year_Month)])
+
+A_ID = FF_pca$li[samples(FF)$sample_id, 1:2] 
+plot(0,type = 'n', axes = FALSE, ann = FALSE) # plot vide pour dessiner la légende dedans
+legend("topleft", 
+       legend = levels(samples(FF)$Year_Month),
+       fill = rainbow(13))
+```
+
+
+```{r}
+l = matrix(c(1,1,1,1,2,2), nrow = 2)
+layout(l) #layout --> fonction pour diviser l'écrsan graphique en sous-parties
+plot(FF_pca$li[,1:2], type = 'n') # pour ne pas afficher le point = les points sont invisibles
+text(FF_pca$li[,1],FF_pca$li[,2],
+     labels = samples(FF)$sample_id,col = rainbow(2)[as.integer(samples(FF)$district)])
+
+A_ID = FF_pca$li[samples(FF)$sample_id, 1:2] 
+plot(0,type = 'n', axes = FALSE, ann = FALSE) # plot vide pour dessiner la légende dedans
+legend("topleft", 
+       legend = levels(samples(FF)$district),
+       fill = rainbow(2))
+```
+
+## La PCA on a re-travaillé pour maximiser la séparation des dates
+
+```{r}
+classifier = interaction(samples(FF)$Year_Month,samples(FF)$district,drop = TRUE)
+FF_between_Date = bca(FF_pca,fac = classifier, scannf = FALSE,nf = 20)
+#plot(BB_between_Date)
+O1 = order((FF_between_Date$c1$CS1))
+P1 = FF_between_Date$c1$CS1[O1]
+names(P1) = motus(FF)$scientific_name[O1]
+P1 #la liste des plantes et leurs poids pour l'Axe 1
+```
+
+
+```{r}
+plot(P1) #la plupart des plantes ont un poids proche de 0
+abline(h=0)
+abline(h=c(-0.2,0.2),lty=3,lwd=0.5)
+```
+
+
+```{r}
+O2 = order((FF_between_Date$c1$CS2))
+P2 = FF_between_Date$c1$CS2[O2]
+names(P2) = motus(FF)$scientific_name[O2]
+P2
+```
+
+```{r}
+plot(P2)
+abline(h=0)
+```
+
+
+```{r}
+l = matrix(c(1,1,1,1,2,2), nrow = 2)
+layout(l) #layout --> fonction pour diviser l'écrsan graphique en sous-parties
+plot(FF_between_Date$ls[,1:2], type = 'n') # pour ne pas afficher le point = les points sont invisibles
+text(FF_between_Date$ls[,1],FF_between_Date$ls[,2],
+     labels = samples(FF)$sample_id,col = rainbow(13)[as.integer(samples(FF)$Year_Month)])
+
+A_ID = FF_pca$li[samples(FF)$sample_id, 1:2] 
+plot(0,type = 'n', axes = FALSE, ann = FALSE) # plot vide pour dessiner la légende dedans
+legend("topleft", 
+       legend = levels(samples(FF)$Year_Month),
+       fill = rainbow(13))
+```
+```{r}
+s.class(FF_between_Date$ls,fac = classifier, xax = 1,yax = 2,
+        pch = as.integer(samples(FF)$district),
+        clabel=0.6)
+```
+
+
+
+
+
+
+
+
+
+
+
